@@ -1,0 +1,31 @@
+#!/usr/bin/expect -f
+
+# Claude Code 사용량 확인 스크립트
+# 사용법: ./check-claude-usage.exp
+
+set timeout 90
+
+# 출력 로깅 활성화
+log_user 1
+
+# Claude Code 실행
+spawn claude
+
+# 초기 렌더링 대기 후 /status 전송 (현재 입력 줄 초기화)
+after 3000
+send "\u0015"
+send "/status\r"
+
+# 결과 수집 대기 후 종료
+after 5000
+send "/exit\r"
+expect {
+    eof {
+        # 종료 완료
+    }
+    timeout {
+        puts "\nError: /exit 타임아웃"
+    }
+}
+
+exit 0
