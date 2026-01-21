@@ -20,7 +20,11 @@ fi
 echo "=== Claude Code 사용량 조회 ==="
 echo ""
 
-RAW_OUTPUT="$(/usr/bin/python3 "$SCRIPT_DIR/capture-status.py")"
+if [[ "$1" == "--json" ]]; then
+    RAW_OUTPUT="$(/usr/bin/python3 "$SCRIPT_DIR/capture-status.py" --json)"
+else
+    RAW_OUTPUT="$(/usr/bin/python3 "$SCRIPT_DIR/capture-status.py")"
+fi
 printf "%s\n" "$RAW_OUTPUT" | grep -v "^$"
 
 echo ""

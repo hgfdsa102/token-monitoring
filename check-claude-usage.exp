@@ -8,8 +8,25 @@ set timeout 90
 # 출력 로깅 활성화
 log_user 1
 
+proc cleanup {reason} {
+    global claude_pid
+    puts "\nCleanup: $reason"
+    catch {send "\u0015"}
+    catch {send "/exit\r"}
+    after 1000
+    if {[info exists claude_pid]} {
+        catch {exec kill -TERM $claude_pid}
+        after 1000
+        catch {exec kill -KILL $claude_pid}
+    }
+    catch {close}
+    catch {wait}
+}
+
 # Claude Code 실행
 spawn claude
+set claude_pid [exp_pid]
+trap {cleanup "signal"} {SIGINT SIGTERM}
 
 # 초기 렌더링 대기 후 /status 전송 (현재 입력 줄 초기화)
 after 3000
@@ -19,12 +36,13 @@ send "/status\r"
 # 결과 수집 대기 후 종료
 after 5000
 send "/exit\r"
+set timeout 15
 expect {
     eof {
         # 종료 완료
     }
     timeout {
-        puts "\nError: /exit 타임아웃"
+        cleanup "/exit timeout"
     }
 }
 
