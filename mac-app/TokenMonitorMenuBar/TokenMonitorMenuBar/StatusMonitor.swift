@@ -109,18 +109,21 @@ final class StatusMonitor {
     static func parseStatus(from jsonText: String) -> StatusResult? {
         guard
             let data = jsonText.data(using: .utf8),
-            let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-            let resetText = obj["current_session_reset"] as? String
+            let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else {
             return nil
         }
 
+        let resetText = obj["current_session_reset"] as? String
         let percent = obj["current_session_percent"] as? Int
-        let parsed = Self.parseResetDate(from: resetText)
+        if resetText == nil && percent == nil {
+            return nil
+        }
+        let parsed = resetText.map { Self.parseResetDate(from: $0) }
         return StatusResult(
             percent: percent,
-            resetDate: parsed.date,
-            resetTimeZone: parsed.timeZone,
+            resetDate: parsed?.date,
+            resetTimeZone: parsed?.timeZone,
             resetText: resetText
         )
     }

@@ -12,6 +12,7 @@ import subprocess
 import sys
 import time
 import json
+from typing import Optional, Tuple
 
 
 def strip_ansi(text: str) -> str:
@@ -88,37 +89,54 @@ def main() -> int:
     saw_usage = False
     saw_prompt = False
     saw_status_hint = False
+    saw_stats_hint = False
     sent_status_text = False
     status_text_at = 0.0
     status_sent_at = 0.0
+    sent_stats = False
     saw_folder_confirm = False
     sent_folder_confirm = False
+    sent_folder_confirm_at = 0.0
+    folder_confirm_attempts = 0
+    folder_confirm_first_seen = 0.0
+    sent_usage_text = False
+    usage_text_at = 0.0
+    usage_sent_at = 0.0
+    saw_usage_at = 0.0
+    saw_reset_line = False
 
     try:
+        def send_command(cmd: bytes) -> None:
+            os.write(master_fd, b"/" + cmd)
+            time.sleep(0.4)
+            os.write(master_fd, b"\r")
+            time.sleep(0.4)
+            os.write(master_fd, b"\r")
+
         while True:
             now = time.time()
 
             # "Do you want to work in this folder?" 프롬프트 자동 승인
-            if saw_folder_confirm and not sent_folder_confirm:
+            if saw_folder_confirm and folder_confirm_first_seen == 0.0:
+                folder_confirm_first_seen = now
+            if saw_folder_confirm and (not sent_folder_confirm or (now - sent_folder_confirm_at > 2.0)) and folder_confirm_attempts < 3:
                 time.sleep(0.3)
                 os.write(master_fd, b"\r")  # Enter로 "Yes, continue" 선택
                 sent_folder_confirm = True
-                start = time.time()  # 타이머 리셋
+                sent_folder_confirm_at = now
+                folder_confirm_attempts += 1
+                if folder_confirm_attempts == 1:
+                    start = time.time()  # 타이머 리셋
+            if saw_folder_confirm and folder_confirm_first_seen and now - folder_confirm_first_seen > 10:
+                break
 
-            if not sent_status_text and saw_prompt and now - start > 4:
-                os.write(master_fd, b"/")
-                time.sleep(0.3)
-                for ch in b"status":
-                    os.write(master_fd, bytes([ch]))
-                    time.sleep(0.08)
-                sent_status_text = True
-                status_text_at = now
-
-            if sent_status_text and (saw_status_hint or now - status_text_at > 4) and not sent_status:
-                time.sleep(0.3)
-                os.write(master_fd, b"\r")
+            if not sent_usage_text and saw_prompt and now - start > 3:
+                send_command(b"status")
+                sent_usage_text = True
+                usage_text_at = now
                 sent_status = True
                 status_sent_at = now
+                usage_sent_at = now
 
             if sent_status and not saw_usage and now - last_tab_time > 1.5:
                 if saw_settings or (status_sent_at and now - status_sent_at > 8):
@@ -127,15 +145,20 @@ def main() -> int:
                     last_tab_time = now
                     time.sleep(0.3)
 
-            if sent_status and saw_usage and not sent_exit:
+            if sent_status and not saw_usage and (usage_sent_at and now - usage_sent_at > 8) and not sent_stats:
+                send_command(b"stats")
+                sent_stats = True
+                usage_sent_at = now
+
+            if sent_status and saw_usage and not sent_exit and (saw_reset_line or (saw_usage_at and now - saw_usage_at > 2.0)):
                 os.write(master_fd, b"/exit\r")
                 sent_exit = True
 
-            if not sent_exit and now - start > 30:
+            if not sent_exit and now - start > 60:
                 os.write(master_fd, b"/exit\r")
                 sent_exit = True
 
-            if now - start > 45:
+            if now - start > 75:
                 break
 
             rlist, _, _ = select.select([master_fd], [], [], 0.2)
@@ -154,10 +177,23 @@ def main() -> int:
                     saw_settings = True
                 if "Do you want to work in this folder?" in recent or "Yes, continue" in recent:
                     saw_folder_confirm = True
-                if "Current session" in recent:
+                recent_lower = recent.lower()
+                if sent_folder_confirm and ("welcome back" in recent_lower or "try \"" in recent_lower):
+                    saw_folder_confirm = False
+                if "try \"" in recent_lower or "for shortcuts" in recent_lower:
+                    saw_prompt = True
+                if "current session" in recent_lower:
                     saw_usage = True
+                    if not saw_usage_at:
+                        saw_usage_at = now
+                if "reset" in recent_lower:
+                    saw_reset_line = True
+                if "/usage" in recent_lower:
+                    saw_status_hint = True
                 if "/status         Show Claude Code status" in recent:
                     saw_status_hint = True
+                if "/stats                       Show your Claude Code usage statistics" in recent:
+                    saw_stats_hint = True
 
             if proc.poll() is not None:
                 break
@@ -180,37 +216,73 @@ def main() -> int:
             pass
     lines = [line.strip() for line in clean.splitlines() if line.strip()]
 
-    def find_section(pattern_name: str):
-        pattern = re.compile(pattern_name + r".*?Resets ([^\n]+)", re.DOTALL)
-        match = pattern.search(clean)
+    def normalize_reset_text(text: str) -> Optional[str]:
+        match = re.search(r"rese[t]?s?\s*([^\n]+)", text, re.IGNORECASE)
         if match:
             return f"Resets {match.group(1).strip()}"
         return None
 
+    def find_section(pattern_name: str):
+        pattern = re.compile(pattern_name + r".*?(rese[t]?s?\s*[^\n]+)", re.DOTALL | re.IGNORECASE)
+        match = pattern.search(clean)
+        if match:
+            return normalize_reset_text(match.group(1).strip())
+        return None
+
     def find_percent(pattern_name: str):
-        pattern = re.compile(pattern_name + r".*?(\d+)%\s*used", re.DOTALL)
+        pattern = re.compile(pattern_name + r".*?(\d+)%\s*used", re.DOTALL | re.IGNORECASE)
         match = pattern.search(clean)
         if match:
             return int(match.group(1))
         return None
 
+    def find_current_session_block(text: str) -> Optional[str]:
+        pattern = re.compile(r"Current session(.*?)(Current week|$)", re.DOTALL | re.IGNORECASE)
+        match = pattern.search(text)
+        if match:
+            return match.group(1)
+        return None
+
+    def parse_block_percent_and_reset(block: str) -> Tuple[Optional[int], Optional[str]]:
+        percent_match = re.search(r"(\d+)%\s*used", block, re.IGNORECASE)
+        reset_match = re.search(r"rese[t]?s?\s*([^\n]+)", block, re.IGNORECASE)
+        percent = int(percent_match.group(1)) if percent_match else None
+        reset = None
+        if reset_match:
+            reset = f"Resets {reset_match.group(1).strip()}"
+        return percent, reset
+
     summary = []
     current_section = None
     percents = {}
+    current_session_reset = None
     for line in lines:
-        if line.startswith("Current session"):
+        lowered = line.lower()
+        if lowered.startswith("current session"):
             current_section = "current_session"
-        elif line.startswith("Current week (all models)"):
+        elif lowered.startswith("current week (all models)"):
             current_section = "current_week_all"
-        elif line.startswith("Current week (Sonnet only)"):
+        elif lowered.startswith("current week (sonnet only)"):
             current_section = "current_week_sonnet"
         elif current_section and "%" in line and "used" in line:
             match = re.search(r"(\d+)%\s*used", line)
             if match:
                 percents[current_section] = int(match.group(1))
-        elif line.startswith("Resets") and current_section:
-            summary.append(f"{current_section}: {line}")
+        elif current_section and re.match(r"rese", lowered):
+            normalized = normalize_reset_text(line) or line
+            summary.append(f"{current_section}: {normalized}")
+            if current_section == "current_session":
+                current_session_reset = normalized
             current_section = None
+
+    if current_session_reset is None:
+        block = find_current_session_block(clean)
+        if block:
+            percent, reset = parse_block_percent_and_reset(block)
+            if percent is not None:
+                percents["current_session"] = percent
+            if reset:
+                summary.append(f"current_session: {reset}")
 
     if not summary:
         reset = find_section("Current session")
